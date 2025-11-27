@@ -7,6 +7,11 @@ from system_config import *
 import matplotlib.pyplot as plt
 
 
+
+def get_sum_loss(F, W, H, R, Pt, batch_size):
+    rate = get_sum_rate(H, F, W, Pt)
+    tau = get_beam_error(H, F, W, R, Pt)
+    return -rate + 10.0 * tau
 # ==================================== initialize F and W ===========================
 def initialize(H, R, Pt, normalization):
     if init_scheme == 'conv':
@@ -493,3 +498,4 @@ def get_beampattern(F, W, at, Pt):
 # print(channel_test[0][0])
 # print(data_test_array[0][0])
 # print('------------------------------')
+
