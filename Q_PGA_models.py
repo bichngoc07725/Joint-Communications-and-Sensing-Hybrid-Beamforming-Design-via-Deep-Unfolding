@@ -5,7 +5,7 @@ import pennylane as qml
 from utility import *
 
 n_qubits = 8
-dev = qml.device("default.qubit.torch", wires=n_qubits, shots=None)
+dev = qml.device("lightning.qubit", wires=n_qubits)
 
 @qml.qnode(dev, interface="torch", diff_method="backprop")
 def quantum_circuit(inputs, weights):
@@ -78,3 +78,4 @@ class Q_PGA_Unfold(nn.Module):
             taus.append(get_beam_error(H, F, W, R, Pt))
 
         return torch.stack(rates).T, torch.stack(taus).T, F, W
+
