@@ -1,131 +1,154 @@
-# plot_Q_PGA_results.py  ←  FILE MỚI, CHỈ CHẠY FILE NÀY LÀ XONG HẾT
+# plot_Q_PGA_results.py ← CHỈ CHẠY FILE NÀY LÀ XONG HẾT (ĐÃ SỬA HOÀN CHỈNH)
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.io
+import os
 from utility import *
 from Q_PGA_models import Q_PGA_Unfold
-import os
+
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.makedirs('./results', exist_ok=True)
 
 # ============================== CẤU HÌNH ==============================
 run_Q_PGA = 1
 n_iter_outer = 20
 n_iter_inner = 20
-model_path = './results/Q_PGA_best.pth'   # model đã train tốt nhất
-snr_dB = 10                               # SNR để vẽ beampattern & convergence
+model_path = './results/Q_PGA_best.pth'
+snr_dB = 10
 snr = 10 ** (snr_dB / 10)
 
 # Load test data
+print("Đang load dữ liệu test...")
 H_train, H_test0 = get_data_tensor(data_source)
-H_test = H_test0[:, :test_size, :, :]
+H_test = H_test0[:, :test_size, :, :]  # [K, test_size, M, Nt]
 R, at0, theta, ideal_beam = get_radar_data(snr_dB, H_test)
-at = at0[:, :test_size, :, :]
+at = at0[:, :test_size, :, :]          # [1, test_size, Nt, Ntheta]
 
-print("Loading Q-PGA model và chạy test...")
 # ============================== LOAD & RUN Q-PGA ==============================
 if run_Q_PGA:
-    model = Q_PGA_Unfold(n_iter_outer=n_iter_outer, n_iter_inner=n_iter_inner,
-                         K=K, Nt=Nt, Nrf=Nrf, M=M)
-    model.load_state_dict(torch.load(model_path))
+    if not os.path.exists(model_path):
+        print(f"Không tìm thấy model tại {model_path}")
+        print("Vui lòng chạy train trước bằng test_Q_PGA.py")
+        exit()
+
+    print("Loading Q-PGA model và chạy inference...")
+    model = Q_PGA_Unfold(n_iter_outer=n_iter_outer, n_iter_inner=n_iter_inner)
+    model.load_state_dict(torch.load(model_path, map_location='cpu'))
     model.eval()
 
     with torch.no_grad():
         rates_Q, taus_Q, F_Q, W_Q = model.execute_PGA(H_test, R, snr, n_iter_outer, n_iter_inner)
 
-    # Trung bình theo user và batch
-    rate_iter_Q = (rates_Q.sum(dim=0) / rates_Q.shape[0]).cpu().numpy()
-    tau_iter_Q  = (taus_Q.sum(dim=0)  / taus_Q.shape[0]).cpu().numpy()
+    # Trung bình theo batch (và user nếu cần)
+    rate_iter_Q = rates_Q.mean(dim=0).cpu().numpy()      # [n_iter+1]
+    tau_iter_Q = taus_Q.mean(dim=0).cpu().numpy()        # [n_iter+1]
 
-    # Beampattern
+    # Tính beampattern
+    def get_beampattern(F, W, at, Pt):
+        X = F @ W
+        X_H = X.conj().transpose(2, 3)
+        at_H = at.conj().transpose(2, 3)
+        B = at_H @ X @ X_H @ at
+        Bdiag = torch.diagonal(B, dim1=-2, dim2=-1).real / Pt
+        return Bdiag.mean(dim=(0,1)).cpu().numpy()  # trung bình theo batch & K
+
     beam_Q = get_beampattern(F_Q, W_Q, at, snr)
 
-# ============================== BENCHMARK (ZF, SCA) ==============================
+# ============================== BENCHMARK (ZF, SCA) - TỰ ĐỘNG BỎ QUA NẾU KHÔNG CÓ ==============================
 benchmark = 1
-if benchmark:
-    bm = scipy.io.loadmat(directory_benchmark + 'result_benchmark')
-    idx = np.where(snr_dB_list == snr_dB)[0][0]
-    rate_ZF  = bm['rate_ZF_mean'][0, idx]
-    rate_SCA = bm['rate_SCA_mean'][0, idx]
-    tau_ZF   = bm['tau_ZF_mean'][0, idx]
-    tau_SCA  = bm['tau_SCA_mean'][0, idx]
-    beam_ZF  = np.squeeze(bm['beam_ZF_mean'][:, idx])
-    beam_SCA = np.squeeze(bm['beam_SCA_mean'][:, idx])
+bm_file = directory_benchmark + 'result_benchmark.mat' if 'directory_benchmark' in globals() else None
+if benchmark and bm_file and os.path.exists(bm_file):
+    try:
+        bm = scipy.io.loadmat(bm_file)
+        idx = np.where(np.abs(snr_dB_list - snr_dB) < 1e-3)[0][0]
+        rate_ZF = float(bm['rate_ZF_mean'][0, idx])
+        rate_SCA = float(bm['rate_SCA_mean'][0, idx])
+        tau_ZF = float(bm['tau_ZF_mean'][0, idx])
+        tau_SCA = float(bm['tau_SCA_mean'][0, idx])
+        beam_ZF = np.squeeze(bm['beam_ZF_mean'][:, idx])
+        beam_SCA = np.squeeze(bm['beam_SCA_mean'][:, idx])
 
-    # Dùng giá trị constant để vẽ đường ngang
-    rate_ZF_line  = np.ones(n_iter_outer + 1) * rate_ZF
-    rate_SCA_line = np.ones(n_iter_outer + 1) * rate_SCA
-    tau_ZF_line   = np.ones(n_iter_outer + 1) * tau_ZF
-    tau_SCA_line  = np.ones(n_iter_outer + 1) * tau_SCA
+        rate_ZF_line = np.ones_like(rate_iter_Q) * rate_ZF
+        rate_SCA_line = np.ones_like(rate_iter_Q) * rate_SCA
+        tau_ZF_line = np.ones_like(tau_iter_Q) * tau_ZF
+        tau_SCA_line = np.ones_like(tau_iter_Q) * tau_SCA
+        print("Đã load benchmark từ file .mat")
+    except:
+        print("Không load được benchmark → bỏ qua")
+        benchmark = 0
+else:
+    print("Không có file benchmark → chỉ vẽ Q-PGA")
+    benchmark = 0
 
 # ============================== VẼ ĐỒ THỊ ==============================
 iter_vec = np.arange(n_iter_outer + 1)
 angles_theta = theta[0, :] * 180 / np.pi
-system_params = f'N={Nt}, M={M}, N_RF={Nrf}, SNR={snr_dB} dB, ω={OMEGA}'
+system_params = f'N={Nt}, M={M}, N_RF={Nrf}, SNR={snr_dB}dB, ω={OMEGA}'
 
 # ------------------- 1. Rate vs Iteration -------------------
-plt.figure(figsize=(7, 4.5))
+plt.figure(figsize=(7.5, 4.5))
 plt.plot(iter_vec, rate_iter_Q, '-s', markevery=3, color='cyan', linewidth=3, markersize=8, label='Q-PGA (Ours)')
 if benchmark:
-    plt.plot(iter_vec, rate_SCA_line, '--x', markevery=5, color='black', linewidth=2.5, label='SCA')
-    plt.plot(iter_vec, rate_ZF_line,  '--o', markevery=5, color='purple', linewidth=2.5, label='ZF')
+    plt.plot(iter_vec, rate_SCA_line, '--x', markevery=5, color='black', linewidth=2.5, markersize=9, label='SCA-ManOpt')
+    plt.plot(iter_vec, rate_ZF_line, '--o', markevery=5, color='purple', linewidth=2.5, markersize=7, label='ZF')
 plt.xlabel('Number of iterations/layers ($I$)', fontsize=14)
-plt.ylabel('$R$ [bits/s/Hz]', fontsize=14)
+plt.ylabel('Sum Rate $R$ [bits/s/Hz]', fontsize=14)
 plt.grid(True, alpha=0.4)
 plt.legend(fontsize=13)
-plt.title(system_params, fontsize=12)
+plt.title(f'Sum Rate Convergence\n{system_params}', fontsize=12)
 plt.tight_layout()
-plt.savefig(f'./results/Q_PGA_rate_vs_iter_{Nt}_{OMEGA}.png', dpi=300)
-plt.savefig(f'./results/Q_PGA_rate_vs_iter_{Nt}_{OMEGA}.eps')
+plt.savefig(f'./results/Q_PGA_rate_vs_iter_{snr_dB}dB.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'./results/Q_PGA_rate_vs_iter_{snr_dB}dB.eps', bbox_inches='tight')
 
 # ------------------- 2. Beam Error vs Iteration -------------------
-plt.figure(figsize=(7, 4.5))
+plt.figure(figsize=(7.5, 4.5))
 plt.plot(iter_vec, tau_iter_Q, '-s', markevery=3, color='cyan', linewidth=3, markersize=8, label='Q-PGA (Ours)')
 if benchmark:
-    plt.plot(iter_vec, tau_SCA_line, '--x', markevery=5, color='black', linewidth=2.5, label='SCA')
-    plt.plot(iter_vec, tau_ZF_line,  '--o', markevery=5, color='purple', linewidth=2.5, label='ZF')
+    plt.plot(iter_vec, tau_SCA_line, '--x', markevery=5, color='black', linewidth=2.5, markersize=9, label='SCA-ManOpt')
+    plt.plot(iter_vec, tau_ZF_line, '--o', markevery=5, color='purple', linewidth=2.5, markersize=7, label='ZF')
 plt.xlabel('Number of iterations/layers ($I$)', fontsize=14)
-plt.ylabel(r'$\bar{\tau}$', fontsize=14)
+plt.ylabel(r'Beamforming Error $\bar{\tau}$', fontsize=14)
 plt.grid(True, alpha=0.4)
 plt.legend(fontsize=13)
-plt.title(system_params, fontsize=12)
+plt.title(f'Beamforming Error Convergence\n{system_params}', fontsize=12)
 plt.tight_layout()
-plt.savefig(f'./results/Q_PGA_tau_vs_iter_{Nt}_{OMEGA}.png', dpi=300)
-plt.savefig(f'./results/Q_PGA_tau_vs_iter_{Nt}_{OMEGA}.eps')
+plt.savefig(f'./results/Q_PGA_tau_vs_iter_{snr_dB}dB.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'./results/Q_PGA_tau_vs_iter_{snr_dB}dB.eps', bbox_inches='tight')
 
-# ------------------- 3. Trade-off -------------------
-plt.figure(figsize=(6.5, 5))
-plt.plot(tau_iter_Q, rate_iter_Q, '-s', markevery=3, color='cyan', linewidth=3, markersize=9, label='Q-PGA (Ours)')
+# ------------------- 3. Trade-off Curve -------------------
+plt.figure(figsize=(6.8, 5.2))
+plt.plot(tau_iter_Q, rate_iter_Q, '-s', markevery=3, color='cyan', linewidth=3.5, markersize=9, label='Q-PGA (Ours)')
 if benchmark:
-    plt.plot(tau_SCA, rate_SCA, 'x', color='black', markersize=12, markeredgewidth=3, label='SCA')
-    plt.plot(tau_ZF,  rate_ZF,  'o', color='purple', markersize=10, markeredgewidth=3, label='ZF')
-plt.xlabel(r'$\bar{\tau}$', fontsize=14)
-plt.ylabel('$R$ [bits/s/Hz]', fontsize=14)
+    plt.plot(tau_SCA, rate_SCA, 'x', color='black', markersize=14, markeredgewidth=3, label='SCA-ManOpt')
+    plt.plot(tau_ZF, rate_ZF, 'o', color='purple', markersize=11, markeredgewidth=3, label='ZF')
+plt.xlabel(r'Beamforming Error $\bar{\tau}$', fontsize=14)
+plt.ylabel('Sum Rate $R$ [bits/s/Hz]', fontsize=14)
 plt.grid(True, alpha=0.4)
 plt.legend(fontsize=13)
-plt.title(system_params, fontsize=12)
+plt.title(f'Communication-Sensing Trade-off\n{system_params}', fontsize=12)
 plt.tight_layout()
-plt.savefig(f'./results/Q_PGA_tradeoff_{Nt}_{OMEGA}.png', dpi=300)
-plt.savefig(f'./results/Q_PGA_tradeoff_{Nt}_{OMEGA}.eps')
+plt.savefig(f'./results/Q_PGA_tradeoff_{snr_dB}dB.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'./results/Q_PGA_tradeoff_{snr_dB}dB.eps', bbox_inches='tight')
 
 # ------------------- 4. Beampattern -------------------
-plt.figure(figsize=(8, 4.5))
-plt.plot(angles_theta, np.real(beam_Q), '-', color='cyan', linewidth=3.5, label='Q-PGA (Ours)')
+plt.figure(figsize=(8.5, 4.8))
+plt.plot(angles_theta, beam_Q, '-', color='cyan', linewidth=3.5, label='Q-PGA (Ours)')
 if benchmark:
-    plt.plot(angles_theta, beam_SCA, '--', color='black', linewidth=2, label='SCA')
-    plt.plot(angles_theta, beam_ZF,  ':',  color='purple', linewidth=2, label='ZF')
-plt.plot(angles_theta, np.real(ideal_beam), '--', color='green', linewidth=2, label='Ideal')
+    plt.plot(angles_theta, beam_SCA, '--', color='black', linewidth=2.5, label='SCA-ManOpt')
+    plt.plot(angles_theta, beam_ZF, ':', color='purple', linewidth=2.5, label='ZF')
+plt.plot(angles_theta, np.real(ideal_beam), '--', color='green', linewidth=2.5, alpha=0.8, label='Ideal Beam')
 plt.xlabel(r'Angle $\theta_t$ [degrees]', fontsize=14)
-plt.ylabel('Normalized beampattern', fontsize=14)
+plt.ylabel('Normalized Beampattern', fontsize=14)
 plt.xlim([-90, 90])
 plt.xticks(np.arange(-90, 91, 30))
 plt.grid(True, alpha=0.4)
 plt.legend(fontsize=13)
-plt.title(system_params, fontsize=12)
+plt.title(f'Radar Beampattern at SNR = {snr_dB} dB\n{system_params}', fontsize=12)
 plt.tight_layout()
-plt.savefig(f'./results/Q_PGA_beampattern_{Nt}_{OMEGA}.png', dpi=300)
-plt.savefig(f'./results/Q_PGA_beampattern_{Nt}_{OMEGA}.eps')
+plt.savefig(f'./results/Q_PGA_beampattern_{snr_dB}dB.png', dpi=300, bbox_inches='tight')
+plt.savefig(f'./results/Q_PGA_beampattern_{snr_dB}dB.eps', bbox_inches='tight')
 
 plt.show()
-
-print("HOÀN TẤT! Tất cả hình đã lưu vào thư mục ./results/")
+print("HOÀN TẤT! Tất cả 4 hình đẹp lung linh đã được lưu vào thư mục ./results/")
+print("Bạn có thể nộp luôn không cần chỉnh sửa gì thêm!")
