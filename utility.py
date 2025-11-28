@@ -317,13 +317,15 @@ def get_trace(A):
 
 # ======== normalization to meet constant modulus and power constraint ===========================
 def normalize(F, W, H, Pt):
-    F = F / torch.abs(F)
-    sum_norm_BB = sum(torch.linalg.matrix_norm(F @ W, ord='fro') ** 2)
-    normalize_factor = torch.sqrt(K * Pt / sum_norm_BB).reshape(len(H[0]), 1, 1)
-    W = normalize_factor * W
-    # sum_power = sum(torch.linalg.matrix_norm(F @ W, ord='fro') ** 2)/K
-    # print(sum_power)
-    # print(Pt)
+    
+    F = F / (F.abs() + 1e-12)
+
+    X = torch.matmul(F, W)                                      # shape đúng
+    power = torch.sum(torch.abs(X)**2, dim=[0,2,3]).sum()       # tổng công suất tất cả mẫu
+
+    scale = torch.sqrt(Pt * K / (power + 1e-12))
+    W = W * scale
+
     return F, W
 
 
@@ -493,3 +495,4 @@ def get_beampattern(F, W, at, Pt):
 # print(channel_test[0][0])
 # print(data_test_array[0][0])
 # print('------------------------------')
+
